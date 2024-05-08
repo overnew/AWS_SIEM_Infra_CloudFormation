@@ -1,0 +1,145 @@
+
+AWSTemplateFormatVersion: 2010-09-09
+#Parameters:
+#  StageName:
+#    Type: String
+#    Default: v1
+#    Description: Name of API stage.
+#  KeyName:
+#    Type: String
+#    Default: MyKeyName
+#    Description: Name of an API key
+Resources:
+  
+  KinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: apiConnectKinesis
+      #RetentionPeriodHours: Integer
+      ShardCount: 1
+      #StreamEncryption: 
+      #  StreamEncryption
+      #StreamModeDetails: 
+      #  StreamModeDetails
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+
+  KinesisFirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn: [KinesisStream, FirehoseDeliveryRole, S3Bucket]
+    Properties:
+      #AmazonopensearchserviceDestinationConfiguration: 
+      #  AmazonopensearchserviceDestinationConfiguration
+      DeliveryStreamName: 'firehoseDeliver'
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration: 
+        KinesisStreamARN: !GetAtt KinesisStream.Arn
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn #!GetAtt
+      S3DestinationConfiguration: 
+        BucketARN: !GetAtt S3Bucket.Arn
+        BufferingHints: # 둘중 하나가 만족되면 전송
+            IntervalInSeconds: 30
+            SizeInMBs: 5
+        #CloudWatchLoggingOptions: 
+        #  CloudWatchLoggingOptions
+        #CompressionFormat: String
+        #EncryptionConfiguration: 
+        #  EncryptionConfiguration
+        #ErrorOutputPrefix: String
+        #Prefix: String
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+
+  FirehoseDeliveryRole:
+    Type: AWS::IAM::Role
+    DependsOn: [KinesisStream, S3Bucket]
+    Properties:
+      RoleName: FirehoseDeliveryRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: #[firehose.amazonaws.com, s3.amazonaws.com]
+                - firehose.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      #ManagedPolicyArns:
+      #  - "arn:aws:iam::aws:policy/service-role/AmazonKinesisFirehoseDeliveryRolePolicy"  # Kinesis Firehose Delivery Role용 관리 정책
+      Policies:
+        - PolicyName: KinesisDescribeStreamPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                Resource:
+                  - !GetAtt KinesisStream.Arn
+        - PolicyName: S3FullAccess  #s3에 저장을 위한 권한
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*', 's3-object-lambda:*']
+                  #- 's3:*'
+                Resource: '*'
+                  #- !GetAtt S3Bucket.Arn
+        - PolicyName: KinesisFirehoseFullAccess  #KinesisFirehose 권한부여
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['firehose:*']
+                Resource: '*'
+        - PolicyName: KinesisFullAccess  #Kinesis 권한부여
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['kinesis:*']
+                Resource: '*'
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+  S3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Need to define a static BucketName due to a circular dependency with the AWS::SNS::TopicPolicy
+      BucketName: 'fires3ddfos'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      AccessControl: BucketOwnerFullControl
+      LifecycleConfiguration:
+        Rules:
+          -
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+            NoncurrentVersionExpirationInDays: 3
+            Status: Enabled
+      #LoggingConfiguration:
+      #  DestinationBucketName: !Ref S3BucketLogs
+      #  LogFilePrefix: !Sub '/logs/${BucketName}/'
+      #NotificationConfiguration:
+      #  TopicConfigurations:
+      #    -
+      #      Event: s3:ObjectCreated:Put
+      #      Topic: !Ref SNSTopic
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+      VersioningConfiguration:
+        Status: Suspended # or Enabled
