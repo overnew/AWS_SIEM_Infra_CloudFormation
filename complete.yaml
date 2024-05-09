@@ -1,0 +1,542 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Parameters:
+  InstanceType:
+    Description: Instance Type for OpenSearch Cluster
+    Type: String
+    Default: m5.large.search
+
+  InstanceCount:
+    Description: Number of Instances for OpenSearch Cluster
+    Type: Number
+    Default: 2
+  
+  OSUsername:
+    Description: Username of the OS Admin
+    Type: String
+    Default: mastermaster
+  
+  OSPassword:
+    Description: Password of the OS Admin
+    Type: String
+    Default: 'Master1234$' 
+  
+  OSDomainName:
+    Description: Domain name for OpenSearch
+    Type: String
+    Default: ldj-opensearch-test-domain
+  
+  StageName:
+    Type: String
+    Default: v1
+    Description: Name of API stage.
+  KeyName:
+    Type: String
+    Default: kinesisKey
+    Description: Name of an API key
+  
+  KinesisName:
+    Type: String
+    Default: apiConnectKinesis
+    Description: Name of Kinesis
+    
+Resources:
+  KinesisStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Sub '${KinesisName}'
+      #RetentionPeriodHours: Integer
+      ShardCount: 1
+      #StreamEncryption: 
+      #  StreamEncryption
+      #StreamModeDetails: 
+      #  StreamModeDetails
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+
+  KinesisFirehoseDeliveryStream:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    DependsOn: [KinesisStream, FirehoseDeliveryRole, BackS3Bucket, OpenSearch]
+    Properties:
+      AmazonopensearchserviceDestinationConfiguration: 
+        BufferingHints: 
+          IntervalInSeconds: 30
+          SizeInMBs: 5
+        CloudWatchLoggingOptions: 
+          Enabled: true
+          LogGroupName: opensearchPipe
+          LogStreamName: opensearchStream
+        #ClusterEndpoint: !Sub 'https://vpc-${OSDomainName}-274gdajy6lcu5uu2r7byb625rq.${AWS::Region}.es.amazonaws.com'
+        DocumentIdOptions: 
+          DefaultDocumentIdFormat: FIREHOSE_DEFAULT
+        DomainARN: !Sub 'arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}'
+        IndexName: firehose
+        IndexRotationPeriod: NoRotation
+        #ProcessingConfiguration:   #여기서 람다로 변환 넣을 수 있다.
+        #RetryOptions:  # kinesis가 오류일 때, 재사도 하는 시간 초
+        #  AmazonopensearchserviceRetryOptions
+        RoleARN: !GetAtt OpenSearchFirehoseDeliveryRole.Arn   # 역할!!!
+        S3BackupMode: AllDocuments  # 모든 데이터 백업
+        S3Configuration: 
+          BucketARN: !GetAtt BackS3Bucket.Arn
+          #BufferingHints: 
+          #  IntervalInSeconds: 30
+          #  SizeInMBs: 5
+          #CloudWatchLoggingOptions: 
+          CompressionFormat: ZIP
+          #EncryptionConfiguration:  KMS 사용 시, 
+          #  EncryptionConfiguration
+          ErrorOutputPrefix: firehoseS3error
+          Prefix: firehose
+          RoleARN: !GetAtt OpenSearchFirehoseDeliveryRole.Arn
+        #TypeName: String  #이건 무슨 타입일까?
+        VpcConfiguration:  #opensearch가 위치하는 vpc 설명
+          RoleARN: !GetAtt OpenSearchFirehoseDeliveryRole.Arn
+          SecurityGroupIds: 
+            - !Ref OpenSearchSG
+          SubnetIds: 
+            - 'subnet-02c59928b96231787'     
+      DeliveryStreamName: 'firehoseDeliver'
+      DeliveryStreamType: KinesisStreamAsSource
+      KinesisStreamSourceConfiguration: 
+        KinesisStreamARN: !GetAtt KinesisStream.Arn
+        RoleARN: !GetAtt FirehoseDeliveryRole.Arn #!GetAtt
+      #S3DestinationConfiguration: 
+      #  BucketARN: !GetAtt S3Bucket.Arn
+      #  BufferingHints: # 둘중 하나가 만족되면 전송
+      #      IntervalInSeconds: 30
+      #      SizeInMBs: 5
+      #  #CloudWatchLoggingOptions: 
+      #  #  CloudWatchLoggingOptions
+      #  #CompressionFormat: String
+      #  #EncryptionConfiguration: 
+      #  #  EncryptionConfiguration
+      #  #ErrorOutputPrefix: String
+      #  #Prefix: String
+      #  RoleARN: !GetAtt FirehoseDeliveryRole.Arn
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+
+  FirehoseDeliveryRole:
+    Type: AWS::IAM::Role
+    DependsOn: [KinesisStream, BackS3Bucket]
+    Properties:
+      RoleName: FirehoseDeliveryRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: #[firehose.amazonaws.com, s3.amazonaws.com]
+                - firehose.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      #ManagedPolicyArns:
+      #  - "arn:aws:iam::aws:policy/service-role/AmazonKinesisFirehoseDeliveryRolePolicy"  # Kinesis Firehose Delivery Role용 관리 정책
+      Policies:
+        - PolicyName: KinesisDescribeStreamPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:DescribeStream
+                Resource:
+                  - !GetAtt KinesisStream.Arn
+        - PolicyName: S3FullAccess  #s3에 저장을 위한 권한
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*', 's3-object-lambda:*']
+                  #- 's3:*'
+                Resource: '*'
+                  #- !GetAtt S3Bucket.Arn  #'*'
+        - PolicyName: KinesisFirehoseFullAccess  #KinesisFirehose 권한부여
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['firehose:*']
+                Resource: '*'
+        - PolicyName: KinesisFullAccess  #Kinesis 권한부여
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['kinesis:*']
+                Resource: '*'
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+
+  OpenSearchFirehoseDeliveryRole:
+    Type: AWS::IAM::Role
+    DependsOn: [KinesisStream, BackS3Bucket]
+    Properties:
+      RoleName: OpenSearchFirehoseDeliveryRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: #[firehose.amazonaws.com, s3.amazonaws.com]
+                - firehose.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      #ManagedPolicyArns:
+      #  - "arn:aws:iam::aws:policy/service-role/AmazonKinesisFirehoseDeliveryRolePolicy"  # Kinesis Firehose Delivery Role용 관리 정책
+      Policies:
+        - PolicyName: S3FullAccess  #s3에 저장을 위한 권한
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*', 's3-object-lambda:*']
+                  #- 's3:*'
+                Resource: '*'
+                  #- !GetAtt S3Bucket.Arn  #'*'
+        - PolicyName: aoss  #s3에 저장을 위한 권한
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['s3:*', 's3-object-lambda:*']
+                  #- 's3:*'
+                Resource: 
+                  - !Sub 'arn:aws:aoss:${AWS::Region}:${AWS::AccountId}:collection/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
+        - PolicyName: Lambda
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['lambda:InvokeFunction', 'lambda:GetFunctionConfiguration']
+                Resource: 
+                  - !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%'
+        - PolicyName: ec2
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: [ "ec2:DescribeVpcs","ec2:DescribeVpcAttribute","ec2:DescribeSubnets","ec2:DescribeSecurityGroups","ec2:DescribeNetworkInterfaces","ec2:CreateNetworkInterface","ec2:CreateNetworkInterfacePermission","ec2:DeleteNetworkInterface"]
+                Resource: '*'
+        - PolicyName: Opensearch
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ["es:DescribeElasticsearchDomain","es:DescribeElasticsearchDomains","es:DescribeElasticsearchDomainConfig","es:ESHttpPost","es:ESHttpPut"]
+                Resource: # ["arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/*"]
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/*"
+        - PolicyName: OpensearchGet
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ["es:ESHttpGet"]
+                Resource: #["arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_all/_settings","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_cluster/stats","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/testindex/_mapping/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_nodes","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_nodes/*/stats","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_stats","arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/testindex/_stats"]
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_all/_settings"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_cluster/stats"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/testindex/_mapping/%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_nodes"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_nodes/*/stats"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/_stats"
+                  - !Sub "arn:aws:es:${AWS::Region}:${AWS::AccountId}:domain/${OSDomainName}/testindex/_stats"
+        - PolicyName: logPutter
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ["logs:PutLogEvents"]
+                Resource: '*'
+                #["arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/kinesisfirehose/openfirehose:log-stream:*","arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:%FIREHOSE_POLICY_TEMPLATE_PLACEHOLDER%:log-stream:*"]
+        - PolicyName: KinesisFirehoseFullAccess  #KinesisFirehose 권한부여
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['firehose:*']
+                Resource: '*'
+        - PolicyName: KinesisFullAccess  #Kinesis 권한부여
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ['kinesis:*']
+                Resource: '*'
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+
+  BackS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      # Need to define a static BucketName due to a circular dependency with the AWS::SNS::TopicPolicy
+      BucketName: 'fires3ddfos-openup'
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      AccessControl: BucketOwnerFullControl
+      LifecycleConfiguration:
+        Rules:
+          -
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 3
+            NoncurrentVersionExpirationInDays: 3
+            Status: Enabled
+      #LoggingConfiguration:
+      #  DestinationBucketName: !Ref S3BucketLogs
+      #  LogFilePrefix: !Sub '/logs/${BucketName}/'
+      #NotificationConfiguration:
+      #  TopicConfigurations:
+      #    -
+      #      Event: s3:ObjectCreated:Put
+      #      Topic: !Ref SNSTopic
+      PublicAccessBlockConfiguration:  # 접근 정책
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+      VersioningConfiguration:
+        Status: Suspended # or Enabled
+
+  OpenSearch:
+    DependsOn: [OpenSearchSG]
+    Type: AWS::OpenSearchService::Domain
+    Properties:
+      DomainName: !Ref OSDomainName
+      AccessPolicies: #누구를 접속하게 해줄지
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              AWS: '*'
+            Action: 'es:*'
+            Resource: '*'
+      #AdvancedOptions: 
+      #  Key: Value
+      AdvancedSecurityOptions:      # Specifies options for fine-grained access control.
+        Enabled: true
+        InternalUserDatabaseEnabled: true  #  이 옵션이 있어야 마스터 유저 생성 가능
+        MasterUserOptions: 
+          MasterUserName: !Ref OSUsername
+          MasterUserPassword: !Ref OSPassword 
+          # 데이터를 바로 넣기 싫다면 dynamic refernece 사용 https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/dynamic-references.html
+      ClusterConfig:
+        InstanceType: !Ref InstanceType
+        InstanceCount: !Ref InstanceCount
+        #ZoneAwarenessEnabled: true
+        #ZoneAwarenessConfig: 
+        #  AvailabilityZoneCount: 3
+
+      #CognitoOptions: 
+      #  CognitoOptions
+      DomainEndpointOptions: # custom endpoint 세팅 가능
+        EnforceHTTPS: true  # 모든 전송을 https로 받음. enable fine-grained access control한 경우 필수
+      EBSOptions:
+        EBSEnabled: true
+        VolumeType: gp2
+        VolumeSize: 10
+      EncryptionAtRestOptions:  # 암호화가 필요한 경우, 
+        Enabled: true
+        # KmsKeyId: String #kms 키를 사용하는 경우 필요
+      EngineVersion: 'OpenSearch_2.11'
+      IPAddressType: 'ipv4'
+      #LogPublishingOptions: 
+      NodeToNodeEncryptionOptions: #노드간의 암호화/ 기본적으로 VPC 내의 트래픽은 암호화되지 않습니다. 
+        Enabled: true
+      #OffPeakWindowOptions:  # 사용량이 적은 시간 설정
+      #  OffPeakWindowOptions
+      #SoftwareUpdateOptions: 
+      #  SoftwareUpdateOptions
+      Tags:
+        -
+          Key: owner
+          Value: ldj
+      VPCOptions: 
+        SecurityGroupIds: 
+          - !Ref OpenSearchSG
+        SubnetIds: 
+          - subnet-02c59928b96231787    #하나만 해야지 생성되는데?
+        #  - subnet-02a6d8743d4fcb8b9   
+        #  - subnet-0f43eace403155dd6
+  OpenSearchSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow ALL Traffic
+      GroupName: ldj-OpenSearchSG
+      SecurityGroupIngress:
+        - IpProtocol: -1
+          CidrIp: '0.0.0.0/0'
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: '0.0.0.0/0'
+      VpcId: 'vpc-01c885f9e4c0434f7' #!Ref [VPC 리소스 이름]
+      Tags:
+       -
+         Key: owner
+         Value: ldj
+
+  Api:
+    Type: 'AWS::ApiGateway::RestApi'
+    Properties:
+      Name: kinesis-api
+      ApiKeySourceType: HEADER
+  PetsResource:
+    Type: 'AWS::ApiGateway::Resource'
+    Properties:
+      RestApiId: !Ref Api
+      ParentId: !GetAtt Api.RootResourceId
+      PathPart: 'pets'   # /pets 라는 경로 생성
+  PetsMethodGet:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref PetsResource
+      HttpMethod: GET
+      ApiKeyRequired: true    #키 필요
+      AuthorizationType: NONE
+      Integration:      #처리하는 백엔드 정보의 지정
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        Uri: http://petstore-demo-endpoint.execute-api.com/petstore/pets/
+  PetsMethodPost:
+    Type: 'AWS::ApiGateway::Method'
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref PetsResource
+      HttpMethod: POST
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      Integration:
+        Type: HTTP_PROXY
+        IntegrationHttpMethod: GET
+        Uri: http://petstore-demo-endpoint.execute-api.com/petstore/pets/
+  
+  #kinesis 연결
+  PetsMethodPut:
+    Type: 'AWS::ApiGateway::Method'
+    DependsOn: [APIGatewayKinesisProxyPolicyRole, KinesisFirehoseDeliveryStream]
+    Properties:
+      RestApiId: !Ref Api
+      ResourceId: !Ref PetsResource
+      HttpMethod: PUT
+      ApiKeyRequired: true
+      AuthorizationType: NONE
+      Integration:
+        Type: AWS
+        IntegrationHttpMethod: POST
+        Uri: !Sub 'arn:aws:apigateway:${AWS::Region}:kinesis:action/PutRecord'
+        #'arn:aws:apigateway:${AWS::Region}:${AWS::AccountId}:proxy/kinesis-data-stream/apiConnectKinesis/POST'
+        # arn:aws:apigateway:us-east-1:kinesis:action/GetRecords
+        Credentials: !GetAtt APIGatewayKinesisProxyPolicyRole.Arn
+        PassthroughBehavior: WHEN_NO_MATCH
+        #RequestParameters: integration.request.header.Content-Type
+        RequestTemplates: 
+          "application/x-amz-json-1.1": !Sub >
+            {"StreamName": "${KinesisName}", "Data": "$util.base64Encode($input.json('$.Data'))", "PartitionKey": "$input.path('$.PartitionKey')"}
+        #IntegrationResponses:
+        #  StatusCode: '200'
+        #  ResponseTemplates: "'application/json'"
+        IntegrationResponses:
+        - StatusCode: 200 #create a default response for the caller
+          ResponseTemplates:
+            application/json: ''
+      MethodResponses:
+        - StatusCode: 200
+          ResponseModels:
+            application/json: "Empty"
+
+  # API GW가 Kinesis로 데이터 전송을 위한 역할          
+  APIGatewayKinesisProxyPolicyRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: APIGatewayKinesisProxyPolicyRole
+      AssumeRolePolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - apigateway.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: APIGWPushToCloudWatchLogs
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: ["logs:CreateLogGroup","logs:CreateLogStream","logs:DescribeLogGroups","logs:DescribeLogStreams","logs:PutLogEvents","logs:GetLogEvents","logs:FilterLogEvents"]
+                Resource: '*'
+        - PolicyName: KinesisFullAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - 'kinesis:*'
+                Resource: '*'
+      Tags:
+        -
+          Key: owner
+          Value: ldj       
+          
+  #배포
+  ApiDeployment:
+    DependsOn: [PetsMethodPut]
+    Type: 'AWS::ApiGateway::Deployment'
+    DependsOn:
+      - PetsMethodGet
+    Properties:
+      RestApiId: !Ref Api
+      StageName: !Sub '${StageName}'
+  UsagePlan:
+    Type: AWS::ApiGateway::UsagePlan
+    DependsOn:
+      - ApiDeployment
+    Properties:
+      Description: Example usage plan with a monthly quota of 1000 calls and method-level throttling for /pets GET 
+      ApiStages:
+        - ApiId: !Ref Api
+          Stage: !Sub '${StageName}'
+          Throttle:
+            "/pets/GET": 
+              RateLimit: 50.0
+              BurstLimit: 100
+      Quota:
+        Limit: 1000
+        Period: MONTH
+      Throttle:
+        RateLimit: 100.0
+        BurstLimit: 200
+      UsagePlanName: "My Usage Plan"
+  ApiKey:
+    Type: AWS::ApiGateway::ApiKey
+    Properties: 
+      Description: API Key
+      Name: !Sub '${KeyName}'
+      Enabled: True
+  UsagePlanKey:
+    Type: AWS::ApiGateway::UsagePlanKey
+    Properties:
+      KeyId: !Ref ApiKey
+      KeyType: API_KEY
+      UsagePlanId: !Ref UsagePlan
+
+Outputs:
+  ApiRootUrl:
+    Description: Root Url of the API
+    Value: !Sub 'https://${Api}.execute-api.${AWS::Region}.amazonaws.com/${StageName}'
+  OpenSearchEndpoint:
+    Description: OpenSearch Endpoint URL
+    Value: !Sub ${OpenSearch.DomainEndpoint}

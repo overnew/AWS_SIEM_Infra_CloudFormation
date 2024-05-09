@@ -68,8 +68,11 @@ Resources:
         PassthroughBehavior: WHEN_NO_MATCH
         #RequestParameters: integration.request.header.Content-Type
         RequestTemplates: 
-          "application/x-amz-json-1.1": >
+          "application/x-amz-json-1.1": !Sub >
             {"StreamName": "apiConnectKinesis", "Data": "$util.base64Encode($input.json('$.Data'))", "PartitionKey": "$input.path('$.PartitionKey')"}
+        
+        #    {"StreamName": "${APIGatewayKinesisProxyPolicyRole.Arn}", "Data": "$util.base64Encode($input.json('$.Data'))", "PartitionKey": "$input.path('$.PartitionKey')"}
+            
         #IntegrationResponses:
         #  StatusCode: '200'
         #  ResponseTemplates: "'application/json'"
